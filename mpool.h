@@ -8,7 +8,7 @@
  * otherwise they will leak.
  */
 #ifndef LG_POOL_AUTO
-#define LG_POOL_AUTO 1
+#define LG_POOL_AUTO 0
 #endif
 
 /* Turn on debugging traces */

@@ -5,12 +5,14 @@
 
 #include "mpool.h"
 
+#define PMAX 11
+
 int main() {
-        int i, sz, res, max_pool_sz;
+        int i, sz, max_pool_sz;
         int *ip;
 
-        /* Init a new mpool for values 2^4 to 2^11 */
-        mpool *mp = mpool_init(4, 11);
+        /* Init a new mpool for values 2^4 to 2^PMAX */
+        mpool *mp = mpool_init(4, PMAX);
         max_pool_sz = mp->max_pool;
         srandomdev();
 
