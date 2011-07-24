@@ -51,7 +51,7 @@ static void *get_mmap(long sz) {
  * the last to NULL (later, to another pool). */
 static void **new_pool(unsigned int sz, unsigned int totalsz) {
         void *p = get_mmap(totalsz);
-        int i, o, lim;               /* o=offset */
+        int i, o=0, lim;               /* o=offset */
         int **pool = (int **)p;
         void *last = NULL;
         assert(pool);
@@ -64,7 +64,7 @@ static void **new_pool(unsigned int sz, unsigned int totalsz) {
                 o = (i*sz)/sizeof(void *);
                 pool[o] = (int *) &pool[o+(sz/sizeof(void *))];
                 last = pool[o];
-                if (DBG) fprintf(stderr, "%d (%d / 0x%04x) -> %p = %p\n",
+                if (DBG > 1) fprintf(stderr, "%d (%d / 0x%04x) -> %p = %p\n",
                     i, o, o, &pool[o], pool[o]);
         }
         pool[o] = NULL;
@@ -72,7 +72,7 @@ static void **new_pool(unsigned int sz, unsigned int totalsz) {
 }
 
 /* Add a new pool, resizing the pool array if necessary. */
-static void *add_pool(mpool *mp, void *p, int sz) {
+static void add_pool(mpool *mp, void *p, int sz) {
         void **nps, **ps;       /* new pools, current pools */
         int i, *nsizes, *sizes;
 
@@ -129,7 +129,7 @@ mpool *mpool_init(int min2, int max2) {
         for (i=0; i<ct; i++) {
                 sz = (1 << (i + min2));
                 p = new_pool(sz, pgsz);
-                if (DBG) fprintf(stderr, "%d: got %p (%d bytes per, %d slots)\n",
+                if (DBG) fprintf(stderr, "%d: got %p (%d bytes per, %ld slots)\n",
                     i, p, sz, pgsz / sz);
                 mp->ps[i] = p;
                 mp->hs[i] = &p[0];
@@ -150,7 +150,7 @@ void mpool_free(mpool *mp) {
                 if (sz > 0) {   /* 0'd pools are already-munmap'd large pools */
                         sz = sz >= pgsz ? sz : pgsz;
                         if (DBG) fprintf(stderr, "Freeing pool %d, sz %d (%p)\n", i, sz, mp->ps[i]);
-                        if (munmap(mp->ps[i], sz) == -1) err(1, "munmap");
+                        if (munmap(mp->ps[i], sz) == -1) err(1, "munmap(1)");
                 } else {
                         if (DBG) fprintf(stderr, "Skipping already freed large pool %d\n", i);
                 }
@@ -163,7 +163,7 @@ void mpool_free(mpool *mp) {
  * If larger than max_pool, just mmap it. If pool is full, mmap a new one and
  * link it to the end of the current one. */
 void *mpool_alloc(mpool *mp, int sz) {
-        void **cur, **next, **np;    /* new pool */
+        void **cur, **np;    /* new pool */
         int i, p, szceil;
         assert(mp);
         if (sz >= mp->max_pool) {
@@ -201,7 +201,7 @@ void *mpool_alloc(mpool *mp, int sz) {
  * most recently allocated pages. This is best avoided when possible.
  */
 void mpool_repool(mpool *mp, void *p, int sz) {
-        int i, szceil, e, poolsz, max_pool = mp->max_pool, pgsz = mp->pg_sz;
+        int i=0, szceil, e, poolsz, max_pool = mp->max_pool, pgsz = mp->pg_sz;
         void **ip;
 
         /* If size is unknown, look up the pool size and index by location.
@@ -225,11 +225,13 @@ void mpool_repool(mpool *mp, void *p, int sz) {
                 assert(sz > 0);
         }
 
-        if (sz > pgsz) {
-                if (DBG) printf("Unpooled large, sz:%d\n", sz);
-                if (munmap(p, sz) == -1) err(1, "munmap");
+        if (sz > mp->max_pool) {
+                if (DBG) printf("Unpooled large, sz:%d, p:%p\n", sz, p);
                 /* if skip it during mpool_free, already freed */
-                if (LG_POOL_AUTO) mp->sizes[i] = 0;
+                if (LG_POOL_AUTO) {
+                        if (munmap(p, sz) == -1) err(1, "munmap(2)");
+                        mp->sizes[i] = 0;
+                }
                 return;
         }
 
