@@ -49,15 +49,15 @@ static void *get_mmap(long sz) {
 
 /* Each cell in the pool should point to the next cell,
  * the last to NULL (later, to another pool). */
-static void **new_pool(unsigned int sz, unsigned int totalsz) {
-        void *p = get_mmap(totalsz);
+static void **new_pool(unsigned int sz, unsigned int page_sz) {
+        void *p = get_mmap(sz > page_sz ? sz : page_sz);
         int i, o=0, lim;               /* o=offset */
         int **pool = (int **)p;
         void *last = NULL;
         assert(pool);
         assert(sz > sizeof(void *));
 
-        lim = (totalsz/sz);
+        lim = (page_sz/sz);
         if (DBG) fprintf(stderr, "sz: %d, lim: %d => %d\n", sz, lim, lim * sz);
         for (i=0; i<lim; i++) {
                 if (last) assert(last == pool[o]);
@@ -128,9 +128,10 @@ mpool *mpool_init(int min2, int max2) {
 
         for (i=0; i<ct; i++) {
                 sz = (1 << (i + min2));
+                int slot_ct = pgsz / sz;
                 p = new_pool(sz, pgsz);
-                if (DBG) fprintf(stderr, "%d: got %p (%d bytes per, %ld slots)\n",
-                    i, p, sz, pgsz / sz);
+                if (DBG) fprintf(stderr, "%d: got %p (%d bytes per, %d slots)\n",
+                    i, p, sz, slot_ct == 0 ? 1 : slot_ct);
                 mp->ps[i] = p;
                 mp->hs[i] = &p[0];
                 assert(mp->hs[i]);
