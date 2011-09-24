@@ -1,18 +1,17 @@
 #ifndef MPOOL_H
 #define MPOOL_H
 
-/* Save size info for large pools. Adds overhead when repooling, but
- * makes it possible to free them without knowing their exact size
- * (including when the whole mpool set is freed).
- * If 0, large pools *must* be manually deallocated (via mpool_repool),
- * otherwise they will leak.
- */
-#ifndef LG_POOL_AUTO
-#define LG_POOL_AUTO 0
+/* Turn on debugging traces */
+#ifndef MPOOL_DEBUG
+#define MPOOL_DEBUG 0
 #endif
 
-/* Turn on debugging traces */
-#define DBG 0
+/* Allow overriding malloc functions. */
+#ifndef MPOOL_MALLOC
+#define MPOOL_MALLOC(sz) malloc(sz)
+#define MPOOL_REALLOC(p, sz) realloc(p, sz)
+#define MPOOL_FREE(p, sz) free(p)
+#endif
 
 typedef struct {
         int ct;                /* actual pool count */
@@ -25,9 +24,25 @@ typedef struct {
         void *hs[1];           /* heads for pools' free lists */
 } mpool;
 
+/* Initialize a memory pool for allocations between 2^min2 and 2^max2,
+ * inclusive. (Larger allocations will be directly allocated and freed
+ * via mmap / munmap.) */
 mpool *mpool_init(int min2, int max2);
+
+/* Allocate SZ bytes. */
 void *mpool_alloc(mpool *mp, int sz);
+
+/* mmap a new memory pool of TOTAL_SZ bytes, then build an internal
+ * freelist of SZ-byte cells, with the head at (result)[0]. */
+void **mpool_new_pool(unsigned int sz, unsigned int total_sz);
+
+/* Return pointer P (SZ bytes in size) to the appropriate pool. */
 void mpool_repool(mpool *mp, void *p, int sz);
+
+/* Resize P from OLD_SZ to NEW_SZ, copying content. */
+void *mpool_realloc(mpool *mp, void *p, int old_sz, int new_sz);
+
+/* Free the pool. */
 void mpool_free(mpool *mp);
 
 #endif

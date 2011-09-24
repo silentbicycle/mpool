@@ -19,14 +19,16 @@
  * allocate/free pointers in amortized O(1) time. Memory is allocated a
  * page at a time, then added to a set of pools of equally sized
  * regions. A free list for each size is maintained in the unused
- * regions. When a pointer is repooled, its size is looked up (if not
- * provided), then it is put at the head of the appropriate pool's free
- * list.
+ * regions. When a pointer is repooled, it is linked back into the
+ * pool with the given size's free list.
+ *
+ * Note that repooling with the wrong size leads to subtle/ugly memory
+ * clobbering bugs. Turning on memory use logging via MPOOL_DEBUG
+ * can help pin down the location of most such errors.
  * 
- * Allocations larger than mp->max_pool (configurable, usually over 2048
- * bytes) are allocated whole via mmap and freed immediately via munmap;
- * no free list is used. Also, see the note about LG_POOL_AUTO in
- * mpool.h.
+ * Allocations larger than the page size are allocated whole via
+ * mmap, and those larger than mp->max_pool (configurable) are
+ * freed immediately via munmap; no free list is used.
  */
 
 #include <stdio.h>
@@ -36,9 +38,12 @@
 #include <err.h>
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <string.h>
 #include <math.h>
 
 #include "mpool.h"
+
+#define DBG MPOOL_DEBUG
 
 static void *get_mmap(long sz) {
         void *p = mmap(0, sz, PROT_READ|PROT_WRITE,
@@ -47,18 +52,29 @@ static void *get_mmap(long sz) {
         return p;
 }
 
-/* Each cell in the pool should point to the next cell,
- * the last to NULL (later, to another pool). */
-static void **new_pool(unsigned int sz, unsigned int page_sz) {
-        void *p = get_mmap(sz > page_sz ? sz : page_sz);
+/* base-2 int ceiling */
+static int ilog2(int v) {
+        return (int) ceil(log2(v));
+}
+
+static int iceil2(int v) {
+        return 2 << ilog2(v);
+}
+
+/* mmap a new memory pool of TOTAL_SZ bytes, then build an internal
+ * freelist of SZ-byte cells, with the head at (result)[0]. */
+void **mpool_new_pool(unsigned int sz, unsigned int total_sz) {
+        void *p = get_mmap(sz > total_sz ? sz : total_sz);
         int i, o=0, lim;               /* o=offset */
         int **pool = (int **)p;
         void *last = NULL;
         assert(pool);
         assert(sz > sizeof(void *));
 
-        lim = (page_sz/sz);
-        if (DBG) fprintf(stderr, "sz: %d, lim: %d => %d\n", sz, lim, lim * sz);
+        lim = (total_sz/sz);
+        if (DBG) fprintf(stderr,
+            "mpool_new_pool sz: %d lim: %d => %d %p\n",
+            sz, lim, lim * sz, p);
         for (i=0; i<lim; i++) {
                 if (last) assert(last == pool[o]);
                 o = (i*sz)/sizeof(void *);
@@ -73,24 +89,18 @@ static void **new_pool(unsigned int sz, unsigned int page_sz) {
 
 /* Add a new pool, resizing the pool array if necessary. */
 static void add_pool(mpool *mp, void *p, int sz) {
-        void **nps, **ps;       /* new pools, current pools */
-        int i, *nsizes, *sizes;
-
-        if (DBG) fprintf(stderr, "Adding pool (%d/%d) at %p, sz %d\n",
+        void **nps, *nsizes;       /* new pools, new sizes */
+        assert(p);
+        assert(sz > 0);
+        if (DBG) fprintf(stderr, "mpool_add_pool (%d / %d) @ %p, sz %d\n",
             mp->ct, mp->pal, p, sz);
         if (mp->ct == mp->pal) {
                 mp->pal *= 2;   /* ram will exhaust before overflow... */
-                nps = malloc(mp->pal * sizeof(void **));
-                nsizes = malloc(mp->pal * sizeof(int *));
-                if (nps == NULL || nsizes == NULL) err(1, "malloc");
-                sizes = mp->sizes;
-                ps = mp->ps;
-                for (i=0; i<mp->ct; i++) {
-                        nps[i] = ps[i]; nsizes[i] = sizes[i];
-                }
+                nps = MPOOL_REALLOC(mp->ps, mp->pal * sizeof(void **));
+                nsizes = MPOOL_REALLOC(mp->sizes, mp->pal * sizeof(int *));
+                if (nps == NULL || nsizes == NULL) err(1, "realloc");
                 mp->sizes = nsizes;
                 mp->ps = nps;
-                free(ps); free(sizes);
         }
 
         mp->ps[mp->ct] = p;
@@ -101,43 +111,33 @@ static void add_pool(mpool *mp, void *p, int sz) {
 /* Initialize a memory pool set, with pools in sizes
  * 2^min2 to 2^max2. */
 mpool *mpool_init(int min2, int max2) {
-        int i, sz;                     /* size of each cell in this pool */
         int palen;                     /* length of pool array */
         int ct = ct = max2 - min2 + 1; /* pool array count */
         long pgsz = sysconf(_SC_PAGESIZE);
         mpool *mp;
-        void **p, *pools;
+        void *pools;
         int *sizes;
 
-        palen = pow(2, ceil(log2(ct))); /* round to next power of 2 */
-        if (DBG) fprintf(stderr, "Initializing an mpool for cells %d - %d bytes\n",
-            (int)pow(2, min2), (int)pow(2, max2));
+        palen = iceil2(ct);
+        if (DBG) fprintf(stderr, "mpool_init for cells %d - %d bytes\n",
+            2 << min2, 2 << max2);
 
         assert(ct > 0);
-        mp = malloc(sizeof(mpool) + (ct-1)*sizeof(void *));
-        pools = malloc(palen*sizeof(void **));
-        sizes = malloc(palen*sizeof(int));
+        mp = MPOOL_MALLOC(sizeof(mpool) + (ct-1)*sizeof(void *));
+        pools = MPOOL_MALLOC(palen*sizeof(void **));
+        sizes = MPOOL_MALLOC(palen*sizeof(int));
         if (mp == NULL || pools == NULL || sizes == NULL) err(1, "malloc");
         mp->ct = ct;
         mp->ps = pools;
         mp->pal = palen;
         mp->pg_sz = pgsz;
         mp->sizes = sizes;
-        mp->min_pool = pow(2, min2);
-        mp->max_pool = pow(2, max2);
+        mp->min_pool = 2 << min2;
+        mp->max_pool = 2 << max2;
+        bzero(sizes, palen * sizeof(void *));
+        bzero(pools, palen * sizeof(void *));
+        bzero(mp->hs, palen * sizeof(void *));
 
-        for (i=0; i<ct; i++) {
-                sz = (1 << (i + min2));
-                int slot_ct = pgsz / sz;
-                p = new_pool(sz, pgsz);
-                if (DBG) fprintf(stderr, "%d: got %p (%d bytes per, %d slots)\n",
-                    i, p, sz, slot_ct == 0 ? 1 : slot_ct);
-                mp->ps[i] = p;
-                mp->hs[i] = &p[0];
-                assert(mp->hs[i]);
-                mp->sizes[i] = sz;
-        }
-        
         return mp;
 }
 
@@ -147,17 +147,17 @@ void mpool_free(mpool *mp) {
         assert(mp);
         if (DBG) fprintf(stderr, "%d/%d pools, freeing...\n", mp->ct, mp->pal);
         for (i=0; i<mp->ct; i++) {
-                sz = mp->sizes[i];
-                if (sz > 0) {   /* 0'd pools are already-munmap'd large pools */
+                void *p = mp->ps[i];
+                if (p) {
+                        sz = mp->sizes[i];
+                        assert(sz > 0);
                         sz = sz >= pgsz ? sz : pgsz;
-                        if (DBG) fprintf(stderr, "Freeing pool %d, sz %d (%p)\n", i, sz, mp->ps[i]);
+                        if (DBG) fprintf(stderr, "mpool_free %d, sz %d (%p)\n", i, sz, mp->ps[i]);
                         if (munmap(mp->ps[i], sz) == -1) err(1, "munmap(1)");
-                } else {
-                        if (DBG) fprintf(stderr, "Skipping already freed large pool %d\n", i);
                 }
         }
-        free(mp->ps);
-        free(mp);
+        MPOOL_FREE(mp->ps, mp->ct * sizeof(*ps));
+        MPOOL_FREE(mp, sizeof(*mp));
 }
 
 /* Allocate memory out of the relevant memory pool.
@@ -165,84 +165,68 @@ void mpool_free(mpool *mp) {
  * link it to the end of the current one. */
 void *mpool_alloc(mpool *mp, int sz) {
         void **cur, **np;    /* new pool */
-        int i, p, szceil;
+        int i, p, szceil = 0;
         assert(mp);
         if (sz >= mp->max_pool) {
-                if (DBG) fprintf(stderr, "(mmaping directly, %d bytes) ", sz);
                 cur = get_mmap(sz); /* just mmap it */
-                if (LG_POOL_AUTO) add_pool(mp, cur, sz);
+                if (DBG) fprintf(stderr,
+                    "mpool_alloc mmap %d bytes @ %p\n", sz, cur);
                 return cur;
         }
         
         for (i=0, p=mp->min_pool; ; i++, p*=2) {
                 if (p > sz) { szceil = p; break; }
         }
-
+        assert(szceil > 0);
         cur = mp->hs[i];        /* get current head */
+        if (cur == NULL) {      /* lazily allocate & init pool */
+                void **pool = mpool_new_pool(szceil, mp->pg_sz);
+                mp->ps[i] = pool;
+                mp->hs[i] = &pool[0];
+                mp->sizes[i] = szceil;
+                cur = mp->hs[i];
+        }
         assert(cur);
+
         if (*cur == NULL) {     /* if at end, attach to a new page */
-                if (DBG) fprintf(stderr, "Adding a new pool w/ cell size %d\n", szceil);
-                np = new_pool(szceil, mp->pg_sz);
+                if (DBG) fprintf(stderr,
+                    "mpool_alloc adding pool w/ cell size %d\n", szceil);
+                np = mpool_new_pool(szceil, mp->pg_sz);
                 *cur = &np[0];
                 assert(*cur);
-                if (DBG) fprintf(stderr, "-- Set cur to %p\n", *cur);
                 add_pool(mp, np, szceil);
         }
 
-        assert(*cur);
+        assert(*cur > (void *)4096);
+        if (DBG) fprintf(stderr,
+            "mpool_alloc pool %d bytes @ %p (list %d, szceil %d )\n",
+            sz, (void*) cur, i, szceil);
+
         mp->hs[i] = *cur;       /* set head to next head */
         return cur;
 }
 
-/* Free an individual pointer, pointing the head for that size to it, and setting
- * it to the previous head.
- * if sz is > the max pool size, just munmap it.
- * 
- * If sz == -1, determine size by linear scan over memory regions, starting from
- * most recently allocated pages. This is best avoided when possible.
- */
+/* Push an individual pointer P back on the freelist for
+ * the pool with size SZ cells.
+ * if SZ is > the max pool size, just munmap it. */
 void mpool_repool(mpool *mp, void *p, int sz) {
-        int i=0, szceil, e, poolsz, max_pool = mp->max_pool, pgsz = mp->pg_sz;
+        int i=0, szceil, max_pool = mp->max_pool;
         void **ip;
 
-        /* If size is unknown, look up the pool size and index by location.
-         * When large pools are not immediately munmapped, get the index to 0 out the size. */
-        if (sz == -1 || (LG_POOL_AUTO && sz > pgsz)) {
-                for (i=mp->ct-1; i>=0; i--) {
-                        if (!LG_POOL_AUTO) {
-                                poolsz = pgsz;
-                        } else {
-                                poolsz = mp->sizes[i];
-                                if (poolsz <= max_pool) poolsz = pgsz;
-                        }
-                        if (DBG) fprintf(stderr, "Checking pool %d (%p ~ %p) for %p\n",
-                            i, mp->ps[i], mp->ps[i] + poolsz, p);
-                        if (p >= mp->ps[i] && p < mp->ps[i] + poolsz) {
-                                sz = mp->sizes[i];
-                                if (DBG) fprintf(stderr, "Found it in pool %d, sz=%d\n", i, sz);
-                                break;
-                        }
-                }
-                assert(sz > 0);
-        }
-
-        if (sz > mp->max_pool) {
-                if (DBG) printf("Unpooled large, sz:%d, p:%p\n", sz, p);
-                /* if skip it during mpool_free, already freed */
-                if (LG_POOL_AUTO) {
-                        if (munmap(p, sz) == -1) err(1, "munmap(2)");
-                        mp->sizes[i] = 0;
-                }
+        if (sz > max_pool) {
+                if (DBG) fprintf(stderr, "mpool_repool munmap sz %d @ %p\n", sz, p);
+                if (munmap(p, sz) == -1) err(1, "munmap(2)");
                 return;
         }
 
-        for (i=0, e=mp->min_pool; e<=mp->max_pool; i++, e*=2) {
-                if (e > sz) { szceil = e; break; }
-        }
+        szceil = iceil2(sz);
+        szceil = szceil > mp->min_pool ? szceil : mp->min_pool;
 
         ip = (void **)p;
         *ip = mp->hs[i];
         assert(ip);
         mp->hs[i] = ip;
-        if (DBG) fprintf(stderr, "repool: %d, %d bytes: %p\n", i, e, ip);
+        if (DBG) fprintf(stderr,
+            "mpool_repool list %d, %d bytes (ceil %d): %p\n",
+            i, sz, szceil, ip);
 }
