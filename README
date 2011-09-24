@@ -2,11 +2,10 @@ A memory pool allocator, designed for systems that need to allocate/free
 pointers in amortized O(1) time. Memory is allocated a page at a time,
 then added to a set of pools of equally sized regions. A free list for
 each size is maintained in the unused regions. When a pointer is
-repooled, its size is looked up (if not provided), then it is put at the
-head of the appropriate pool's free list.
+repooled, it is put at the head of the appropriate free list.
 
 Allocations larger than mp->max_pool (configurable, usually over 2048
 bytes) are allocated whole via mmap and freed immediately via munmap; no
-free list is used. Also, see the note about LG_POOL_AUTO in mpool.h.
+free list is used.
 
 For example usage, see test.c.
