@@ -4,7 +4,7 @@ COPTS=-Os -g -Wall
 
 all: test
 
-mpool.o: mpool.c
+mpool.o: mpool.c mpool.h Makefile
 	${CC} -c mpool.c ${COPTS}
 
 mpool.c: mpool.h
