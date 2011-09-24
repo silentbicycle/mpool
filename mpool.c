@@ -39,7 +39,6 @@
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <string.h>
-#include <math.h>
 
 #include "mpool.h"
 
@@ -52,13 +51,16 @@ static void *get_mmap(long sz) {
         return p;
 }
 
-/* base-2 int ceiling */
-static int ilog2(int v) {
-        return (int) ceil(log2(v));
-}
-
-static int iceil2(int v) {
-        return 2 << ilog2(v);
+/* Optimized base-2 integer ceiling, from _Hacker's Delight_
+ * by Henry S. Warren, pg. 48. Called 'clp2' there. */
+static unsigned int iceil2(unsigned int x) {
+        x = x - 1;
+        x = x | (x >> 1);
+        x = x | (x >> 2);
+        x = x | (x >> 4);
+        x = x | (x >> 8);
+        x = x | (x >> 16);
+        return x + 1;
 }
 
 /* mmap a new memory pool of TOTAL_SZ bytes, then build an internal
