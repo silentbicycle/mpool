@@ -2,6 +2,7 @@
 
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/time.h>
 
 #include "mpool.h"
 
@@ -18,8 +19,12 @@ int main(int argc, char **argv) {
         if (argc > 1) {
                 seed = atol(argv[1]);
         } else {
-                srandomdev();
-                seed = random();
+                struct timeval tv;
+                if (gettimeofday(&tv, NULL) < 0) {
+                        fprintf(stderr, "gettimeofday fail\n");
+                        return 1;
+                }
+                seed = tv.tv_usec;
         }
         srandom(seed);
         printf("seed is %ld\n", seed);
