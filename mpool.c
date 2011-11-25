@@ -35,7 +35,6 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <assert.h>
-#include <err.h>
 #include <sys/types.h>
 #include <sys/mman.h>
 #include <string.h>
@@ -47,7 +46,7 @@
 static void *get_mmap(long sz) {
         void *p = mmap(0, sz, PROT_READ|PROT_WRITE,
             MAP_PRIVATE|MAP_ANON, -1, 0);
-        if (p == NULL) err(1, "mmap");
+        if (p == MAP_FAILED) return NULL;
         return p;
 }
 
@@ -64,12 +63,15 @@ static unsigned int iceil2(unsigned int x) {
 }
 
 /* mmap a new memory pool of TOTAL_SZ bytes, then build an internal
- * freelist of SZ-byte cells, with the head at (result)[0]. */
+ * freelist of SZ-byte cells, with the head at (result)[0].
+ * Returns NULL on error. */
 void **mpool_new_pool(unsigned int sz, unsigned int total_sz) {
         void *p = get_mmap(sz > total_sz ? sz : total_sz);
         int i, o=0, lim;               /* o=offset */
-        int **pool = (int **)p;
+        int **pool;
         void *last = NULL;
+        if (p == NULL) return NULL;
+        pool = (int **)p;;
         assert(pool);
         assert(sz > sizeof(void *));
 
@@ -90,7 +92,7 @@ void **mpool_new_pool(unsigned int sz, unsigned int total_sz) {
 }
 
 /* Add a new pool, resizing the pool array if necessary. */
-static void add_pool(mpool *mp, void *p, int sz) {
+static int add_pool(mpool *mp, void *p, int sz) {
         void **nps, *nsizes;       /* new pools, new sizes */
         assert(p);
         assert(sz > 0);
@@ -100,7 +102,7 @@ static void add_pool(mpool *mp, void *p, int sz) {
                 mp->pal *= 2;   /* ram will exhaust before overflow... */
                 nps = MPOOL_REALLOC(mp->ps, mp->pal * sizeof(void **));
                 nsizes = MPOOL_REALLOC(mp->sizes, mp->pal * sizeof(int *));
-                if (nps == NULL || nsizes == NULL) err(1, "realloc");
+                if (nps == NULL || nsizes == NULL) return -1;
                 mp->sizes = nsizes;
                 mp->ps = nps;
         }
@@ -108,10 +110,11 @@ static void add_pool(mpool *mp, void *p, int sz) {
         mp->ps[mp->ct] = p;
         mp->sizes[mp->ct] = sz;
         mp->ct++;
+        return 0;
 }
 
 /* Initialize a memory pool set, with pools in sizes
- * 2^min2 to 2^max2. */
+ * 2^min2 to 2^max2. Returns NULL on error. */
 mpool *mpool_init(int min2, int max2) {
         int palen;                     /* length of pool array */
         int ct = ct = max2 - min2 + 1; /* pool array count */
@@ -128,7 +131,7 @@ mpool *mpool_init(int min2, int max2) {
         mp = MPOOL_MALLOC(sizeof(mpool) + (ct-1)*sizeof(void *));
         pools = MPOOL_MALLOC(palen*sizeof(void **));
         sizes = MPOOL_MALLOC(palen*sizeof(int));
-        if (mp == NULL || pools == NULL || sizes == NULL) err(1, "malloc");
+        if (mp == NULL || pools == NULL || sizes == NULL) return NULL;
         mp->ct = ct;
         mp->ps = pools;
         mp->pal = palen;
@@ -145,7 +148,7 @@ mpool *mpool_init(int min2, int max2) {
 
 /* Free a memory pool set. */
 void mpool_free(mpool *mp) {
-        int i, sz, pgsz = mp->pg_sz;
+        long  i, sz, pgsz = mp->pg_sz;
         assert(mp);
         if (DBG) fprintf(stderr, "%d/%d pools, freeing...\n", mp->ct, mp->pal);
         for (i=0; i<mp->ct; i++) {
@@ -154,8 +157,11 @@ void mpool_free(mpool *mp) {
                         sz = mp->sizes[i];
                         assert(sz > 0);
                         sz = sz >= pgsz ? sz : pgsz;
-                        if (DBG) fprintf(stderr, "mpool_free %d, sz %d (%p)\n", i, sz, mp->ps[i]);
-                        if (munmap(mp->ps[i], sz) == -1) err(1, "munmap(1)");
+                        if (DBG) fprintf(stderr, "mpool_free %ld, sz %ld (%p)\n", i, sz, mp->ps[i]);
+                        if (munmap(mp->ps[i], sz) == -1) {
+                                fprintf(stderr, "munmap error while unmapping %lu bytes at %p\n",
+                                    sz, mp->ps[i]);
+                        }
                 }
         }
         MPOOL_FREE(mp->ps, mp->ct * sizeof(*ps));
@@ -164,13 +170,14 @@ void mpool_free(mpool *mp) {
 
 /* Allocate memory out of the relevant memory pool.
  * If larger than max_pool, just mmap it. If pool is full, mmap a new one and
- * link it to the end of the current one. */
+ * link it to the end of the current one. Returns NULL on error. */
 void *mpool_alloc(mpool *mp, int sz) {
         void **cur, **np;    /* new pool */
         int i, p, szceil = 0;
         assert(mp);
         if (sz >= mp->max_pool) {
                 cur = get_mmap(sz); /* just mmap it */
+                if (cur == NULL) return NULL;
                 if (DBG) fprintf(stderr,
                     "mpool_alloc mmap %d bytes @ %p\n", sz, cur);
                 return cur;
@@ -183,6 +190,7 @@ void *mpool_alloc(mpool *mp, int sz) {
         cur = mp->hs[i];        /* get current head */
         if (cur == NULL) {      /* lazily allocate & init pool */
                 void **pool = mpool_new_pool(szceil, mp->pg_sz);
+                if (pool == NULL) return NULL;
                 mp->ps[i] = pool;
                 mp->hs[i] = &pool[0];
                 mp->sizes[i] = szceil;
@@ -194,9 +202,10 @@ void *mpool_alloc(mpool *mp, int sz) {
                 if (DBG) fprintf(stderr,
                     "mpool_alloc adding pool w/ cell size %d\n", szceil);
                 np = mpool_new_pool(szceil, mp->pg_sz);
+                if (np == NULL) return NULL;
                 *cur = &np[0];
                 assert(*cur);
-                add_pool(mp, np, szceil);
+                if (add_pool(mp, np, szceil) < 0) return NULL;
         }
 
         assert(*cur > (void *)4096);
@@ -217,7 +226,10 @@ void mpool_repool(mpool *mp, void *p, int sz) {
 
         if (sz > max_pool) {
                 if (DBG) fprintf(stderr, "mpool_repool munmap sz %d @ %p\n", sz, p);
-                if (munmap(p, sz) == -1) err(1, "munmap(2)");
+                if (munmap(p, sz) == -1) {
+                        fprintf(stderr, "munmap error while unmapping %d bytes at %p\n",
+                            sz, p);
+                }
                 return;
         }
 
