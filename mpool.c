@@ -139,9 +139,9 @@ mpool *mpool_init(int min2, int max2) {
         mp->sizes = sizes;
         mp->min_pool = 2 << min2;
         mp->max_pool = 2 << max2;
-        bzero(sizes, palen * sizeof(void *));
+        bzero(sizes, palen * sizeof(int));
         bzero(pools, palen * sizeof(void *));
-        bzero(mp->hs, palen * sizeof(void *));
+        bzero(mp->hs, ct * sizeof(void *));
 
         return mp;
 }
