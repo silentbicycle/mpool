@@ -244,3 +244,13 @@ void mpool_repool(mpool *mp, void *p, int sz) {
             "mpool_repool list %d, %d bytes (ceil %d): %p\n",
             i, sz, szceil, ip);
 }
+
+/* Reallocate data, growing or shrinking and copying the contents.
+ * Returns NULL on reallocation error. */
+void *mpool_realloc(mpool *mp, void *p, int old_sz, int new_sz) {
+        void *r = mpool_alloc(mp, new_sz);
+        if (r == NULL) return NULL;
+        memcpy(r, p, old_sz);
+        mpool_repool(mp, p, old_sz);
+        return r;
+}
