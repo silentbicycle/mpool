@@ -1,20 +1,20 @@
-COPTS=	-O3 -Wall
+COPTS=	-O2 -Wall
 # COPTS+= -g
 # COPTS+= -DNDEBUG
 # COPTS+= -p
 
-all: mpool.a
+all: libmpool.a
 
 mpool.o: mpool.c Makefile
 	${CC} -c mpool.c ${COPTS}
 
-mpool.a: mpool.o
+libmpool.a: mpool.o
 	${AR} rl $@ mpool.o
 
 mpool.c: mpool.h
 
-test: test.c mpool.a
-	${CC} -o $@ test.c mpool.a ${COPTS}
+test: test.c libmpool.a
+	${CC} -o $@ test.c -L. -lmpool ${COPTS}
 	./test
 
 clean:
