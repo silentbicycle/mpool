@@ -125,7 +125,7 @@ mpool *mpool_init(int min2, int max2) {
 
         palen = iceil2(ct);
         if (DBG) fprintf(stderr, "mpool_init for cells %d - %d bytes\n",
-            2 << min2, 2 << max2);
+            1 << min2, 1 << max2);
 
         assert(ct > 0);
         mp = MPOOL_MALLOC(sizeof(mpool) + (ct-1)*sizeof(void *));
@@ -137,8 +137,8 @@ mpool *mpool_init(int min2, int max2) {
         mp->pal = palen;
         mp->pg_sz = pgsz;
         mp->sizes = sizes;
-        mp->min_pool = 2 << min2;
-        mp->max_pool = 2 << max2;
+        mp->min_pool = 1 << min2;
+        mp->max_pool = 1 << max2;
         bzero(sizes, palen * sizeof(int));
         bzero(pools, palen * sizeof(void *));
         bzero(mp->hs, ct * sizeof(void *));
